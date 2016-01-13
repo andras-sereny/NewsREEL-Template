@@ -1,5 +1,8 @@
 package de.dailab.plistacontest.client;
 
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -26,6 +29,16 @@ public class HttpService {
     private final RecommenderItemTable recommenderItemTable = new RecommenderItemTable();
     
 
+	private Map<String, String> parseParameters(String text) {
+		Map<String,String> paramsMap = new HashMap<>();
+		String[] elements = text.split("&");
+		for (String element: elements) {
+			String[] keyValue = element.split("=");
+			paramsMap.put(keyValue[0], keyValue[1]);
+		}
+		return paramsMap;
+	}
+
 	public Object servePost(Request request, Response response) {
 		String responseText = "";
 		if (request.contentLength() <= 0) {
@@ -33,20 +46,107 @@ public class HttpService {
 			response(response, request, null, false);
 		}
 		else {
-			Map<String, String> parameters = request.params();
+			Map<String, String> parameters = parseParameters(request.body());
+
+
 			String typeMessage = parameters.get("type");
 			String bodyMessage = parameters.get("body");
+			String propertyMessage = parameters.get("properties");
+			String entityMessage = parameters.get("entities");
 
-			// we may recode the body message
-//			if (_breq.getContentType().equals("application/x-www-form-urlencoded; charset=utf-8")) {
-//				bodyMessage = URLDecoder.decode(bodyMessage, "utf-8");
-//			}
-
-			responseText = handleMessage(typeMessage, bodyMessage);
-			response(response, request, responseText, true);
+			// handle idomaar messages
+			if (bodyMessage == null || bodyMessage.length() == 0) {
+				if (request.contentType().equalsIgnoreCase("application/x-www-form-urlencoded; charset=utf-8")) {
+					try {
+						//bodyMessage = URLDecoder.decode(bodyMessage, "utf-8");
+						propertyMessage = URLDecoder.decode(propertyMessage, "utf-8");
+						entityMessage = URLDecoder.decode(entityMessage, "utf-8");
+					} catch (UnsupportedEncodingException exception) {
+						throw new RuntimeException(exception);
+					}
+				}
+				responseText = handleIdomaarMessage(typeMessage, propertyMessage, entityMessage);
+				response(response, request, responseText, true);
+			}
 		}
 		return responseText;
 	}
+
+	private String handleIdomaarMessage(final String messageType, final String properties, final String entities) {
+		// write all data from the server to a file
+		// logger.info(messageType + "\t" + properties + "\t" + entities);
+
+		// create an jSON object from the String
+		final JSONObject jOP = (JSONObject) JSONValue.parse(properties);
+		final JSONObject jOE = (JSONObject) JSONValue.parse(entities);
+
+		// merge the different jsonObjects and correct missing itemIDs
+		jOP.putAll(jOE);
+		Object itemID = jOP.get("itemID");
+		if (itemID == null) {
+			jOP.put("itemID", 0);
+		}
+
+		// define a response object
+		String response = null;
+
+		if ("impression".equalsIgnoreCase(messageType) || "recommendation".equalsIgnoreCase(messageType)) {
+
+			// parse the type of the event
+			final RecommenderItem item = RecommenderItem.parseEventNotification(jOP.toJSONString());
+			final String eventNotificationType = messageType;
+
+			// impression refers to articles read by the user
+			if ("impression".equalsIgnoreCase(eventNotificationType) || "recommendation".equalsIgnoreCase(eventNotificationType)) {
+
+				// we mark this information in the article table
+				if (item.getItemID() != null) {
+					// new items shall be added to the list of items
+					recommenderItemTable.handleItemUpdate(item);
+					item.setNumberOfRequestedResults(6);
+
+					response = "handle impression eventNotification successful";
+
+					boolean recommendationExpected = false;
+					if (properties.contains("\"event_type\": \"recommendation_request\"")) {
+						recommendationExpected = true;
+					}
+					if (recommendationExpected) {
+						List<Long> suggestedItemIDs = recommenderItemTable.getLastItems(item);
+						response = "{" + "\"recs\": {" + "\"ints\": {" + "\"3\": " + suggestedItemIDs + "}" + "}}";
+					}
+
+				}
+				// click refers to recommendations clicked by the user
+			} else if ("click".equalsIgnoreCase(eventNotificationType)) {
+
+				// we mark this information in the article table
+				if (item.getItemID() != null) {
+					// new items shall be added to the list of items
+					recommenderItemTable.handleItemUpdate(item);
+
+					response = "handle impression eventNotification successful";
+				}
+				response = "handle click eventNotification successful";
+
+			} else {
+				System.out.println("unknown event-type: "
+						+ eventNotificationType + " (message ignored)");
+			}
+
+		} else if ("error_notification".equalsIgnoreCase(messageType)) {
+
+			System.out.println("error-notification: " + jOP.toString() + jOE.toJSONString());
+
+		} else {
+			System.out.println("unknown MessageType: " + messageType);
+			// Error handling
+			logger.info(jOP.toString() + jOE.toJSONString());
+			// this.contestRecommender.error(jObj.toString());
+		}
+		return response;
+	}
+
 
 	private String response(Response response, Request request, String text, boolean b) {
 		response.header("Content-Type", "text/html;charset=utf-8");
